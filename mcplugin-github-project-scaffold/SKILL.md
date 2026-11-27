@@ -655,7 +655,110 @@ The resulting shaded jar is dropped into the server's `plugins/` directory. The 
 
 ---
 
-## 13. Checklist when scaffolding a new GitHub project
+## 13. CI/CD — GitHub Actions workflows
+
+Two workflows live under `.github/workflows/`:
+
+### `.github/workflows/publish.yml`
+
+Publishes library modules to GitHub Packages and tags the commit when a `release/{version}` pull request merges.
+
+```yaml
+name: Publish
+
+# Publishes the library modules to GitHub Packages and tags the commit when a release/{version} pull request merges.
+# The steps live in the shared MCEngine/actions workflow: it reads project-version from gradle.properties,
+# stops when the v{version} tag already exists, and otherwise builds, tests,
+# publishes and only then tags, so a failed run leaves no tag behind.
+#
+# Only a merged pull request from a release/{version} branch publishes; the
+# shared workflow also checks that {version} is the merged project-version.
+# workflow_dispatch on master runs the same check by hand, to retry a release
+# after a failure.
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged &&
+       startsWith(github.event.pull_request.head.ref, 'release/'))
+    permissions:
+      contents: write
+      packages: write
+    uses: MCEngine/actions/.github/workflows/publish.yml@master
+    secrets: inherit
+```
+
+### `.github/workflows/release.yml`
+
+Builds the universal plugin jar (`<ProjectName>-{version}.jar` from `platforms/engine`)
+and attaches it to a GitHub release for the `v{version}` tag that Publish created,
+with `wiki/logs/{Major}/{Minor}/{Patch}/CHANGELOG.md` as the notes.
+
+```yaml
+name: Release
+
+# Builds the universal plugin jar and attaches it to a GitHub release for the v{version} tag
+# that Publish created, with wiki/logs/{Major}/{Minor}/{Patch}/CHANGELOG.md as the notes.
+#
+# A tag pushed with the workflow's own token starts no other workflow, so this
+# runs when a Publish run for a merged release/{version}
+# pull request, or a retry on master, finishes. An ordinary merge, whose tag
+# already has its release, does nothing.
+#
+# workflow_dispatch runs the same steps by hand. Its tag input releases an
+# earlier tag that has no release.
+on:
+  workflow_run:
+    workflows: [Publish]
+    types: [completed]
+    branches: ['release/**', master]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release, such as v1.2.0. Leave it empty for the version in gradle.properties.
+        required: false
+        type: string
+
+concurrency:
+  group: github-release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: write
+      actions: write
+      # The build resolves other plugins' libraries from GitHub Packages.
+      packages: read
+    uses: MCEngine/actions/.github/workflows/release.yml@master
+    with:
+      tag: ${{ inputs.tag }}
+```
+
+Key points:
+- The steps live in the shared `MCEngine/actions` repository; your project only references it via `uses`.
+- Publish runs only on a merged `release/{version}` PR (or manual `workflow_dispatch`), reads `project-version` from `gradle.properties`, and stops if the `v{version}` tag already exists.
+- Release runs after a successful Publish run, or manually via `workflow_dispatch` with an optional `tag` input.
+- Both workflows require `contents: write` and `packages: write`/`read` permissions.
+
+---
+
+## 14. Checklist when scaffolding a new GitHub project
 
 - [ ] `gradle/wrapper/gradle-wrapper.properties` + `gradlew` / `gradlew.bat`
 - [ ] `gradle.properties` with `project-group`, `git-org-name`, `git-repository`, `project-version`
@@ -669,4 +772,6 @@ The resulting shaded jar is dropped into the server's `plugins/` directory. The 
 - [ ] `src/main/resources/plugin.yml` in engine and each platform module, using `${name}` / `${version}` tokens
 - [ ] Source trees under `<group>/<project>/<module>/...` for every module
 - [ ] `.gitignore`, `README.md`, `AGENTS.md`, `wiki/INDEX.md`
+- [ ] `.github/workflows/publish.yml` — publish to GitHub Packages and tag on `release/{version}` PR merge
+- [ ] `.github/workflows/release.yml` — attach `<ProjectName>-{version}.jar` to GitHub release
 - [ ] GitHub Packages credentials configured: `GITHUB_ACTOR` and `GITHUB_TOKEN` environment variables for publishing your own artifacts (convention plugin `io.github.mcengine.build-logic` resolves from gradlePluginPortal without auth)
